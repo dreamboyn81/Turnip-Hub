@@ -2,7 +2,7 @@ name: Sync Drivers from Upstream
 
 on:
   schedule:
-    # 每 3 小时执行一次（UTC 时间）
+    # 每 3 小时执行一次（UTC）
     - cron: '0 */3 * * *'
   workflow_dispatch:  # 允许手动触发
 
@@ -29,7 +29,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 定义要同步的源仓库
           declare -A SOURCES=(
             ["DiskDVD_TurniptoolsA8XX"]="DiskDVD/TurniptoolsA8XX"
             ["WinNative-Emu_Drivers"]="WinNative-Emu/Drivers"
@@ -45,14 +44,12 @@ jobs:
             echo "Processing: $REPO"
             echo "========================================"
 
-            # 获取最新 release 信息
             RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$REPO/releases/latest")
 
-            # 检查是否成功获取到 release
             if echo "$RELEASE_JSON" | jq -e '.message' > /dev/null 2>&1; then
-              echo "⚠️  Failed to get latest release for $REPO"
+              echo "Failed to get latest release for $REPO"
               echo "$RELEASE_JSON" | jq .
               continue
             fi
@@ -66,50 +63,44 @@ jobs:
             echo "Latest tag: $TAG"
             echo "Release URL: $RELEASE_URL"
 
-            # 如果该版本目录已存在，则跳过（已同步过）
             if [ -d "$TARGET_DIR" ]; then
-              echo "✅ Already have $TAG, skipping."
+              echo "Already have $TAG, skipping."
               continue
             fi
 
-            echo "📥 New version detected: $TAG"
+            echo "New version detected: $TAG"
             mkdir -p "$TARGET_DIR"
 
             # 下载所有 assets
-            ASSETS=$(echo "$RELEASE_JSON" | jq -c '.assets[]')
-            if [ -z "$ASSETS" ]; then
-              echo "⚠️  No assets found in this release."
-            else
-              echo "$RELEASE_JSON" | jq -c '.assets[]' | while read -r asset; do
-                NAME=$(echo "$asset" | jq -r '.name')
-                DOWNLOAD_URL=$(echo "$asset" | jq -r '.browser_download_url')
-                SIZE=$(echo "$asset" | jq -r '.size')
+            echo "$RELEASE_JSON" | jq -c '.assets[]?' | while read -r asset; do
+              [ -z "$asset" ] && continue
+              NAME=$(echo "$asset" | jq -r '.name')
+              DOWNLOAD_URL=$(echo "$asset" | jq -r '.browser_download_url')
+              SIZE=$(echo "$asset" | jq -r '.size')
 
-                echo "  → Downloading: $NAME ($SIZE bytes)"
-                curl -sL -H "Authorization: Bearer $GH_TOKEN" \
-                  -o "$TARGET_DIR/$NAME" \
-                  "$DOWNLOAD_URL"
-              done
-            fi
+              echo "  Downloading: $NAME ($SIZE bytes)"
+              curl -sL -H "Authorization: Bearer $GH_TOKEN" \
+                -o "$TARGET_DIR/$NAME" \
+                "$DOWNLOAD_URL"
+            done
 
-            # 生成来源说明文件
-            cat > "$TARGET_DIR/SOURCE.md" << EOF
-# Source
-
-- **Repository**: [$REPO](https://github.com/$REPO)
-- **Release**: [$RELEASE_NAME]($RELEASE_URL)
-- **Tag**: \`$TAG\`
-- **Published**: $PUBLISHED_AT
-- **Synced at**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-
-> 本驱动来自上游仓库，仅做镜像备份，版权归原作者所有。
-EOF
+            # 生成来源说明文件（用 printf 避免 heredoc 语法问题）
+            {
+              echo "# Source"
+              echo ""
+              echo "- **Repository**: [$REPO](https://github.com/$REPO)"
+              echo "- **Release**: [$RELEASE_NAME]($RELEASE_URL)"
+              echo "- **Tag**: \`$TAG\`"
+              echo "- **Published**: $PUBLISHED_AT"
+              echo "- **Synced at**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+              echo ""
+              echo "> 本驱动来自上游仓库，仅做镜像备份，版权归原作者所有。"
+            } > "$TARGET_DIR/SOURCE.md"
 
             CHANGED=1
-            echo "✅ Synced $TAG"
+            echo "Synced $TAG"
           done
 
-          # 输出是否有变更（给后续步骤用）
           echo "CHANGED=$CHANGED" >> $GITHUB_ENV
 
       - name: Commit and push if changed
@@ -124,11 +115,9 @@ EOF
           if git diff --staged --quiet; then
             echo "No actual file changes to commit."
           else
-            git commit -m "chore: sync new driver releases
-
-            Auto-synced from upstream repositories."
+            git commit -m "chore: sync new driver releases"
             git push
-            echo "✅ Changes pushed."
+            echo "Changes pushed."
           fi
 
       - name: No changes
