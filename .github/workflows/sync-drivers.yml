@@ -79,7 +79,6 @@ jobs:
               continue
             fi
 
-            # 生成 Release 说明
             {
               echo "## Source"
               echo ""
