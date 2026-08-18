@@ -20,16 +20,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_NAME: ${{ github.repository }}
         run: |
-          set -euo pipefail
+          set -e
 
-          declare -A SOURCES=(
-            ["DiskDVD"]="DiskDVD/TurniptoolsA8XX"
-            ["WinNative"]="WinNative-Emu/Drivers"
-            ["Vauzi"]="Vauzi-17/710"
-          )
+          SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710"
 
-          for PREFIX in "${!SOURCES[@]}"; do
-            REPO="${SOURCES[$PREFIX]}"
+          for ITEM in $SOURCES; do
+            PREFIX=$(echo $ITEM | cut -d: -f1)
+            REPO=$(echo $ITEM | cut -d: -f2)
+
             echo "========================================"
             echo "Checking: $REPO"
             echo "========================================"
@@ -49,7 +47,7 @@ jobs:
             BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
             PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at')
 
-            OUR_TAG="\( {PREFIX}- \){UPSTREAM_TAG}"
+            OUR_TAG="$PREFIX-$UPSTREAM_TAG"
 
             echo "Upstream Tag: $UPSTREAM_TAG"
             echo "Our Tag: $OUR_TAG"
