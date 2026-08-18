@@ -1,0 +1,136 @@
+name: Sync Drivers from Upstream
+
+on:
+  schedule:
+    # 每 3 小时执行一次（UTC 时间）
+    - cron: '0 */3 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y jq curl
+
+      - name: Sync drivers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # 定义要同步的源仓库
+          declare -A SOURCES=(
+            ["DiskDVD_TurniptoolsA8XX"]="DiskDVD/TurniptoolsA8XX"
+            ["WinNative-Emu_Drivers"]="WinNative-Emu/Drivers"
+            ["Vauzi-17_710"]="Vauzi-17/710"
+          )
+
+          mkdir -p drivers
+          CHANGED=0
+
+          for DIR_NAME in "${!SOURCES[@]}"; do
+            REPO="${SOURCES[$DIR_NAME]}"
+            echo "========================================"
+            echo "Processing: $REPO"
+            echo "========================================"
+
+            # 获取最新 release 信息
+            RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/releases/latest")
+
+            # 检查是否成功获取到 release
+            if echo "$RELEASE_JSON" | jq -e '.message' > /dev/null 2>&1; then
+              echo "⚠️  Failed to get latest release for $REPO"
+              echo "$RELEASE_JSON" | jq .
+              continue
+            fi
+
+            TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+            RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url')
+            RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name')
+            PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at')
+
+            TARGET_DIR="drivers/$DIR_NAME/$TAG"
+            echo "Latest tag: $TAG"
+            echo "Release URL: $RELEASE_URL"
+
+            # 如果该版本目录已存在，则跳过（已同步过）
+            if [ -d "$TARGET_DIR" ]; then
+              echo "✅ Already have $TAG, skipping."
+              continue
+            fi
+
+            echo "📥 New version detected: $TAG"
+            mkdir -p "$TARGET_DIR"
+
+            # 下载所有 assets
+            ASSETS=$(echo "$RELEASE_JSON" | jq -c '.assets[]')
+            if [ -z "$ASSETS" ]; then
+              echo "⚠️  No assets found in this release."
+            else
+              echo "$RELEASE_JSON" | jq -c '.assets[]' | while read -r asset; do
+                NAME=$(echo "$asset" | jq -r '.name')
+                DOWNLOAD_URL=$(echo "$asset" | jq -r '.browser_download_url')
+                SIZE=$(echo "$asset" | jq -r '.size')
+
+                echo "  → Downloading: $NAME ($SIZE bytes)"
+                curl -sL -H "Authorization: Bearer $GH_TOKEN" \
+                  -o "$TARGET_DIR/$NAME" \
+                  "$DOWNLOAD_URL"
+              done
+            fi
+
+            # 生成来源说明文件
+            cat > "$TARGET_DIR/SOURCE.md" << EOF
+# Source
+
+- **Repository**: [$REPO](https://github.com/$REPO)
+- **Release**: [$RELEASE_NAME]($RELEASE_URL)
+- **Tag**: \`$TAG\`
+- **Published**: $PUBLISHED_AT
+- **Synced at**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+> 本驱动来自上游仓库，仅做镜像备份，版权归原作者所有。
+EOF
+
+            CHANGED=1
+            echo "✅ Synced $TAG"
+          done
+
+          # 输出是否有变更（给后续步骤用）
+          echo "CHANGED=$CHANGED" >> $GITHUB_ENV
+
+      - name: Commit and push if changed
+        if: env.CHANGED == '1'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add drivers/
+          git status
+
+          if git diff --staged --quiet; then
+            echo "No actual file changes to commit."
+          else
+            git commit -m "chore: sync new driver releases
+
+            Auto-synced from upstream repositories."
+            git push
+            echo "✅ Changes pushed."
+          fi
+
+      - name: No changes
+        if: env.CHANGED != '1'
+        run: echo "No new releases found. Nothing to do."
