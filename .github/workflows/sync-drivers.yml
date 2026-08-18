@@ -2,9 +2,8 @@ name: Sync Drivers to Releases
 
 on:
   schedule:
-    # 每 3 小时检查一次（UTC）
     - cron: '0 */3 * * *'
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,18 +15,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y jq curl
-
       - name: Sync upstream releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
         run: |
           set -euo pipefail
 
-          # 定义上游源
           declare -A SOURCES=(
             ["DiskDVD"]="DiskDVD/TurniptoolsA8XX"
             ["WinNative"]="WinNative-Emu/Drivers"
@@ -40,85 +34,78 @@ jobs:
             echo "Checking: $REPO"
             echo "========================================"
 
-            # 获取上游最新 Release
             RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$REPO/releases/latest")
 
             if echo "$RELEASE_JSON" | jq -e '.message' > /dev/null 2>&1; then
-              echo "⚠️ 获取失败: $REPO"
+              echo "Failed to get latest release for $REPO"
               continue
             fi
 
             UPSTREAM_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
             RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name')
             RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url')
-            BODY=$(echo "$RELEASE_JSON" | jq -r '.body // ""')
+            BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
             PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at')
 
-            # 我们自己仓库使用的 Tag（带前缀防止冲突）
             OUR_TAG="\( {PREFIX}- \){UPSTREAM_TAG}"
 
-            echo "上游 Tag: $UPSTREAM_TAG"
-            echo "我们使用的 Tag: $OUR_TAG"
+            echo "Upstream Tag: $UPSTREAM_TAG"
+            echo "Our Tag: $OUR_TAG"
 
-            # 检查我们仓库是否已经存在这个 Tag
-            if gh release view "\( OUR_TAG" --repo " \){{ github.repository }}" > /dev/null 2>&1; then
-              echo "✅ 已存在 $OUR_TAG，跳过"
+            if gh release view "$OUR_TAG" --repo "$REPO_NAME" > /dev/null 2>&1; then
+              echo "Already exists: $OUR_TAG, skipping"
               continue
             fi
 
-            echo "🆕 发现新版本，开始同步..."
+            echo "New version found, syncing..."
 
-            # 创建临时目录下载资源
             TMP_DIR=$(mktemp -d)
             cd "$TMP_DIR"
 
-            # 下载所有 assets
             echo "$RELEASE_JSON" | jq -c '.assets[]?' | while read -r asset; do
               [ -z "$asset" ] && continue
               NAME=$(echo "$asset" | jq -r '.name')
               URL=$(echo "$asset" | jq -r '.browser_download_url')
-              echo "  下载: $NAME"
+              echo "Downloading: $NAME"
               curl -sL -H "Authorization: Bearer $GH_TOKEN" -o "$NAME" "$URL"
             done
 
-            # 如果没有任何资源文件，跳过
             if [ -z "$(ls -A)" ]; then
-              echo "⚠️ 该 Release 没有资源文件，跳过"
+              echo "No assets found, skipping"
               cd -
               rm -rf "$TMP_DIR"
               continue
             fi
 
-            # 构建 Release 说明（标注来源）
-            cat > release_notes.md << EOF
-## 来源信息
+            # 生成 Release 说明
+            {
+              echo "## Source"
+              echo ""
+              echo "- **Upstream Repo**: [$REPO](https://github.com/$REPO)"
+              echo "- **Original Release**: [$RELEASE_NAME]($RELEASE_URL)"
+              echo "- **Upstream Tag**: \`$UPSTREAM_TAG\`"
+              echo "- **Published**: $PUBLISHED_AT"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## Original Notes"
+              echo ""
+              echo "$BODY"
+              echo ""
+              echo "---"
+              echo ""
+              echo "> Mirrored by Turnip-Hub for emulator convenience. Copyright belongs to the original authors."
+            } > release_notes.md
 
-- **上游仓库**: [$REPO](https://github.com/$REPO)
-- **原始 Release**: [$RELEASE_NAME]($RELEASE_URL)
-- **上游 Tag**: \`$UPSTREAM_TAG\`
-- **发布时间**: $PUBLISHED_AT
-
----
-
-## 原始说明
-
-$BODY
-
----
-
-> 本驱动由 [Turnip-Hub](https://github.com/${{ github.repository }}) 自动同步，仅做镜像方便模拟器拉取。版权归原作者所有。
-EOF
-
-            # 创建我们自己的 Release
             gh release create "$OUR_TAG" \
-              --repo "${{ github.repository }}" \
+              --repo "$REPO_NAME" \
               --title "$PREFIX - $RELEASE_NAME" \
               --notes-file release_notes.md \
               ./*
 
-            echo "✅ 已成功发布: $OUR_TAG"
+            echo "Successfully published: $OUR_TAG"
 
             cd -
             rm -rf "$TMP_DIR"
