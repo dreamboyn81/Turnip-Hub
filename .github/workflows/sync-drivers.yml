@@ -94,13 +94,14 @@ jobs:
               echo "---"
               echo ""
               echo "> Mirrored by Turnip-Hub for emulator convenience. Copyright belongs to the original authors."
-            } > release_notes.md
+            } > /tmp/release_notes.md
 
+            # 只上传驱动文件，不上传 md
             gh release create "$OUR_TAG" \
               --repo "$REPO_NAME" \
               --title "$PREFIX - $RELEASE_NAME" \
-              --notes-file release_notes.md \
-              ./*
+              --notes-file /tmp/release_notes.md \
+              $(ls -1 | grep -v release_notes.md)
 
             echo "Successfully published: $OUR_TAG"
 
