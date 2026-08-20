@@ -78,22 +78,11 @@ jobs:
             fi
 
             {
-              echo "## Source"
+              echo "来源: $RELEASE_URL"
               echo ""
-              echo "- **Upstream Repo**: [$REPO](https://github.com/$REPO)"
-              echo "- **Original Release**: [$RELEASE_NAME]($RELEASE_URL)"
-              echo "- **Upstream Tag**: \`$UPSTREAM_TAG\`"
-              echo "- **Published**: $PUBLISHED_AT"
-              echo ""
-              echo "---"
-              echo ""
-              echo "## Original Notes"
+              echo "## 发生了哪些变化？"
               echo ""
               echo "$BODY"
-              echo ""
-              echo "---"
-              echo ""
-              echo "> Mirrored by Turnip-Hub for emulator convenience. Copyright belongs to the original authors."
             } > /tmp/release_notes.md
 
             # 只上传驱动文件，不上传 md
