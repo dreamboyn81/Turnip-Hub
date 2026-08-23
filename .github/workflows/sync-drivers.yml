@@ -78,12 +78,11 @@ jobs:
             fi
 
             {
-              echo "来源: $RELEASE_URL"
-              echo ""
-              echo "## 发生了哪些变化？"
-              echo ""
               echo "$BODY"
+              echo ""
+              echo "来源: $RELEASE_URL"
             } > /tmp/release_notes.md
+
 
             # 只上传驱动文件，不上传 md
             gh release create "$OUR_TAG" \
