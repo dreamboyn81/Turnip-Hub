@@ -22,14 +22,14 @@ jobs:
         run: |
           set -e
 
-          SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710"
+          SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710 Banners:The412Banner/Banners-Turnip"
 
           for ITEM in $SOURCES; do
-            PREFIX=$(echo $ITEM | cut -d: -f1)
-            REPO=$(echo $ITEM | cut -d: -f2)
+            PREFIX=$(echo "$ITEM" | cut -d: -f1)
+            REPO=$(echo "$ITEM" | cut -d: -f2)
 
             echo "========================================"
-            echo "Checking: $REPO"
+            echo "Checking: $REPO (prefix: $PREFIX)"
             echo "========================================"
 
             RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
@@ -59,6 +59,21 @@ jobs:
 
             echo "New version found, syncing..."
 
+            # 删除该前缀在本仓库的旧 Release（保留最新一个）
+            echo "Cleaning up old releases with prefix '$PREFIX-'..."
+            OLD_RELEASES=$(gh release list --repo "$REPO_NAME" --limit 100 \
+              | awk -v p="$PREFIX-" '$1 ~ "^"p {print $1}')
+            if [ -n "$OLD_RELEASES" ]; then
+              for OLD in $OLD_RELEASES; do
+                if [ "$OLD" != "$OUR_TAG" ]; then
+                  echo "Deleting old release: $OLD"
+                  gh release delete "$OLD" --repo "$REPO_NAME" --yes || true
+                fi
+              done
+            else
+              echo "No old releases to clean up."
+            fi
+
             TMP_DIR=$(mktemp -d)
             cd "$TMP_DIR"
 
@@ -82,7 +97,6 @@ jobs:
               echo ""
               echo "来源: $RELEASE_URL"
             } > /tmp/release_notes.md
-
 
             # 只上传驱动文件，不上传 md
             gh release create "$OUR_TAG" \
