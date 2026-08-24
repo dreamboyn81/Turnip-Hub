@@ -20,7 +20,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_NAME: ${{ github.repository }}
         run: |
-          set -e
+          set -euo pipefail
 
           SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710 Banners:The412Banner/Banners-Turnip"
 
@@ -45,34 +45,33 @@ jobs:
             RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name')
             RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url')
             BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
-            PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at')
 
             OUR_TAG="$PREFIX-$UPSTREAM_TAG"
 
             echo "Upstream Tag: $UPSTREAM_TAG"
             echo "Our Tag: $OUR_TAG"
 
+            # ========== 关键改动：始终清理该前缀的旧 Release，只留最新 ==========
+            echo "Cleaning up old releases with prefix '$PREFIX-' (keep only $OUR_TAG)..."
+            # 用 JSON 拿真正的 tagName，避免 title 匹配失败
+            OLD_TAGS=$(gh release list --repo "$REPO_NAME" --limit 100 --json tagName \
+              --jq ".[].tagName | select(startswith(\"$PREFIX-\"))")
+
+            for OLD in $OLD_TAGS; do
+              if [ "$OLD" != "$OUR_TAG" ]; then
+                echo "Deleting old release + tag: $OLD"
+                # --cleanup-tag 同时删掉 git tag，避免标签堆积
+                gh release delete "$OLD" --repo "$REPO_NAME" --yes --cleanup-tag || true
+              fi
+            done
+
+            # 如果已经存在最新的，就跳过创建
             if gh release view "$OUR_TAG" --repo "$REPO_NAME" > /dev/null 2>&1; then
-              echo "Already exists: $OUR_TAG, skipping"
+              echo "Already exists: $OUR_TAG, cleanup done, skipping create"
               continue
             fi
 
             echo "New version found, syncing..."
-
-            # 删除该前缀在本仓库的旧 Release（保留最新一个）
-            echo "Cleaning up old releases with prefix '$PREFIX-'..."
-            OLD_RELEASES=$(gh release list --repo "$REPO_NAME" --limit 100 \
-              | awk -v p="$PREFIX-" '$1 ~ "^"p {print $1}')
-            if [ -n "$OLD_RELEASES" ]; then
-              for OLD in $OLD_RELEASES; do
-                if [ "$OLD" != "$OUR_TAG" ]; then
-                  echo "Deleting old release: $OLD"
-                  gh release delete "$OLD" --repo "$REPO_NAME" --yes || true
-                fi
-              done
-            else
-              echo "No old releases to clean up."
-            fi
 
             TMP_DIR=$(mktemp -d)
             cd "$TMP_DIR"
@@ -98,14 +97,13 @@ jobs:
               echo "来源: $RELEASE_URL"
             } > /tmp/release_notes.md
 
-            # 只上传驱动文件，不上传 md
             gh release create "$OUR_TAG" \
               --repo "$REPO_NAME" \
               --title "$PREFIX - $RELEASE_NAME" \
               --notes-file /tmp/release_notes.md \
-              $(ls -1 | grep -v release_notes.md)
+              $(ls -1)
 
-            echo "Successfully published: $OUR_TAG"
+            echo "✅ Successfully published: $OUR_TAG"
 
             cd -
             rm -rf "$TMP_DIR"
