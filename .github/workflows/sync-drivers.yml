@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710 Banners:The412Banner/Banners-Turnip"
+          SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710 StevenMXZ:StevenMXZ/Adreno-Tools-Drivers whitebelyash:whitebelyash/AdrenoToolsDrivers Weab-chan:Weab-chan/freedreno_turnip-CI"
 
           for ITEM in $SOURCES; do
             PREFIX=$(echo "$ITEM" | cut -d: -f1)
@@ -45,22 +45,29 @@ jobs:
             RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name')
             RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url')
             BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
+            PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at // empty')
+
+            # 格式化发布日期为 YYYY.MM.DD
+            if [ -n "$PUBLISHED_AT" ] && [ "$PUBLISHED_AT" != "null" ]; then
+              RELEASE_DATE=$(date -d "$PUBLISHED_AT" +%Y.%m.%d 2>/dev/null || echo "$PUBLISHED_AT" | cut -c1-10 | tr '-' '.')
+            else
+              RELEASE_DATE="未知"
+            fi
 
             OUR_TAG="$PREFIX-$UPSTREAM_TAG"
 
             echo "Upstream Tag: $UPSTREAM_TAG"
             echo "Our Tag: $OUR_TAG"
+            echo "Release Date: $RELEASE_DATE"
 
-            # ========== 关键改动：始终清理该前缀的旧 Release，只留最新 ==========
+            # ========== 始终清理该前缀的旧 Release，只留最新 ==========
             echo "Cleaning up old releases with prefix '$PREFIX-' (keep only $OUR_TAG)..."
-            # 用 JSON 拿真正的 tagName，避免 title 匹配失败
             OLD_TAGS=$(gh release list --repo "$REPO_NAME" --limit 100 --json tagName \
               --jq ".[].tagName | select(startswith(\"$PREFIX-\"))")
 
             for OLD in $OLD_TAGS; do
               if [ "$OLD" != "$OUR_TAG" ]; then
                 echo "Deleting old release + tag: $OLD"
-                # --cleanup-tag 同时删掉 git tag，避免标签堆积
                 gh release delete "$OLD" --repo "$REPO_NAME" --yes --cleanup-tag || true
               fi
             done
@@ -92,6 +99,8 @@ jobs:
             fi
 
             {
+              echo "发布日期：$RELEASE_DATE"
+              echo ""
               echo "$BODY"
               echo ""
               echo "来源: $RELEASE_URL"
