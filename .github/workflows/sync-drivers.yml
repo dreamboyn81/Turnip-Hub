@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710 StevenMXZ:StevenMXZ/Adreno-Tools-Drivers whitebelyash:whitebelyash/AdrenoToolsDrivers Weab-chan:Weab-chan/freedreno_turnip-CI K11MCH1:K11MCH1/AdrenoToolsDrivers MrPurple666:MrPurple666/purple-turnip"
+          SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710 StevenMXZ:StevenMXZ/Adreno-Tools-Drivers whitebelyash:whitebelyash/AdrenoToolsDrivers MrPurple666:MrPurple666/purple-turnip"
 
           CANDIDATES_DIR=$(mktemp -d)
           echo "Candidates dir: $CANDIDATES_DIR"
