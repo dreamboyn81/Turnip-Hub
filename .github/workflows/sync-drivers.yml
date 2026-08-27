@@ -38,18 +38,23 @@ jobs:
 
             RELEASE_JSON=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$REPO/releases/latest")
+              "https://api.github.com/repos/$REPO/releases/latest" || echo '{"message":"curl failed"}')
 
             if echo "$RELEASE_JSON" | jq -e '.message' > /dev/null 2>&1; then
               echo "Failed to get latest release for $REPO"
               continue
             fi
 
-            UPSTREAM_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-            RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name')
-            RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url')
+            UPSTREAM_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+            RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name // empty')
+            RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url // empty')
             BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
             PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at // empty')
+
+            if [ -z "$UPSTREAM_TAG" ] || [ "$UPSTREAM_TAG" = "null" ]; then
+              echo "No valid tag, skipping $REPO"
+              continue
+            fi
 
             if [ -n "$PUBLISHED_AT" ] && [ "$PUBLISHED_AT" != "null" ]; then
               RELEASE_DATE=$(date -d "$PUBLISHED_AT" +%Y.%m.%d 2>/dev/null || echo "$PUBLISHED_AT" | cut -c1-10 | tr '-' '.')
@@ -69,12 +74,12 @@ jobs:
             # 始终清理该前缀的旧 Release
             echo "Cleaning up old releases with prefix '$PREFIX-' (keep only $OUR_TAG)..."
             OLD_TAGS=$(gh release list --repo "$REPO_NAME" --limit 100 --json tagName \
-              --jq ".[].tagName | select(startswith(\"$PREFIX-\"))" || true)
+              --jq ".[].tagName | select(startswith(\"$PREFIX-\"))" 2>/dev/null || true)
 
             for OLD in $OLD_TAGS; do
-              if [ "$OLD" != "$OUR_TAG" ]; then
+              if [ -n "$OLD" ] && [ "$OLD" != "$OUR_TAG" ]; then
                 echo "Deleting old release + tag: $OLD"
-                gh release delete "$OLD" --repo "$REPO_NAME" --yes --cleanup-tag || true
+                gh release delete "$OLD" --repo "$REPO_NAME" --yes --cleanup-tag 2>/dev/null || true
               fi
             done
 
@@ -84,14 +89,16 @@ jobs:
               continue
             fi
 
-            # 保存候选（用日期做文件名排序键）
+            # 保存候选
             CAND_FILE="$CANDIDATES_DIR/${SORT_KEY}_${PREFIX}.json"
             echo "$RELEASE_JSON" > "$CAND_FILE"
             echo "Queued for create: $OUR_TAG  (sort key: $SORT_KEY)"
           done
 
           # ========== 第二阶段：按真实发布时间从旧到新创建 ==========
-          CAND_COUNT=$(ls "$CANDIDATES_DIR"/*.json 2>/dev/null | wc -l || echo 0)
+          mapfile -t CAND_FILES < <(find "$CANDIDATES_DIR" -maxdepth 1 -name '*.json' -type f | sort)
+
+          CAND_COUNT=${#CAND_FILES[@]}
           echo ""
           echo "Total candidates to create: $CAND_COUNT"
 
@@ -101,20 +108,24 @@ jobs:
             exit 0
           fi
 
-          # 按文件名排序（日期升序 = 最旧的先创建）
           INDEX=0
-          TOTAL=$(ls "$CANDIDATES_DIR"/*.json | wc -l)
+          TOTAL=$CAND_COUNT
 
-          for CAND_FILE in $(ls "$CANDIDATES_DIR"/*.json | sort); do
+          for CAND_FILE in "${CAND_FILES[@]}"; do
             INDEX=$((INDEX + 1))
             RELEASE_JSON=$(cat "$CAND_FILE")
 
             PREFIX=$(basename "$CAND_FILE" | sed 's/.*_//;s/\.json//')
-            UPSTREAM_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-            RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name')
-            RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url')
+            UPSTREAM_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+            RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name // empty')
+            RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url // empty')
             BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
             PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at // empty')
+
+            if [ -z "$UPSTREAM_TAG" ]; then
+              echo "Invalid candidate, skipping"
+              continue
+            fi
 
             if [ -n "$PUBLISHED_AT" ] && [ "$PUBLISHED_AT" != "null" ]; then
               RELEASE_DATE=$(date -d "$PUBLISHED_AT" +%Y.%m.%d 2>/dev/null || echo "$PUBLISHED_AT" | cut -c1-10 | tr '-' '.')
@@ -133,17 +144,20 @@ jobs:
             TMP_DIR=$(mktemp -d)
             cd "$TMP_DIR"
 
-            echo "$RELEASE_JSON" | jq -c '.assets[]?' | while read -r asset; do
+            # 下载资产
+            echo "$RELEASE_JSON" | jq -c '.assets[]?' 2>/dev/null | while read -r asset; do
               [ -z "$asset" ] && continue
-              NAME=$(echo "$asset" | jq -r '.name')
-              URL=$(echo "$asset" | jq -r '.browser_download_url')
-              echo "Downloading: $NAME"
-              curl -sL -H "Authorization: Bearer $GH_TOKEN" -o "$NAME" "$URL"
+              NAME=$(echo "$asset" | jq -r '.name // empty')
+              URL=$(echo "$asset" | jq -r '.browser_download_url // empty')
+              if [ -n "$NAME" ] && [ -n "$URL" ]; then
+                echo "Downloading: $NAME"
+                curl -sL -H "Authorization: Bearer $GH_TOKEN" -o "$NAME" "$URL" || echo "Failed to download $NAME"
+              fi
             done
 
-            if [ -z "$(ls -A)" ]; then
+            if [ -z "$(ls -A 2>/dev/null)" ]; then
               echo "No assets found, skipping"
-              cd -
+              cd - >/dev/null
               rm -rf "$TMP_DIR"
               continue
             fi
@@ -169,22 +183,29 @@ jobs:
               --title "$PREFIX - $RELEASE_NAME" \
               --notes-file /tmp/release_notes.md \
               $LATEST_FLAG \
-              $(ls -1)
+              $(ls -1) || {
+                echo "Failed to create release $OUR_TAG"
+                cd - >/dev/null
+                rm -rf "$TMP_DIR"
+                continue
+              }
 
             # 写入真实 published_at
             if [ -n "$PUBLISHED_AT" ]; then
               echo "Updating published_at to $PUBLISHED_AT..."
-              RELEASE_ID=$(gh api "repos/$REPO_NAME/releases/tags/$OUR_TAG" --jq '.id')
-              curl -s -X PATCH \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$REPO_NAME/releases/$RELEASE_ID" \
-                -d "{\"published_at\":\"$PUBLISHED_AT\"}" > /dev/null
+              RELEASE_ID=$(gh api "repos/$REPO_NAME/releases/tags/$OUR_TAG" --jq '.id' 2>/dev/null || true)
+              if [ -n "$RELEASE_ID" ]; then
+                curl -s -X PATCH \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$REPO_NAME/releases/$RELEASE_ID" \
+                  -d "{\"published_at\":\"$PUBLISHED_AT\"}" > /dev/null || true
+              fi
             fi
 
             echo "✅ Successfully published: $OUR_TAG"
 
-            cd -
+            cd - >/dev/null
             rm -rf "$TMP_DIR"
           done
 
