@@ -24,6 +24,10 @@ jobs:
 
           SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710 StevenMXZ:StevenMXZ/Adreno-Tools-Drivers whitebelyash:whitebelyash/AdrenoToolsDrivers Weab-chan:Weab-chan/freedreno_turnip-CI K11MCH1:K11MCH1/AdrenoToolsDrivers MrPurple666:MrPurple666/purple-turnip"
 
+          CANDIDATES_DIR=$(mktemp -d)
+          echo "Candidates dir: $CANDIDATES_DIR"
+
+          # ========== 第一阶段：收集需要同步的驱动 + 清理旧版本 ==========
           for ITEM in $SOURCES; do
             PREFIX=$(echo "$ITEM" | cut -d: -f1)
             REPO=$(echo "$ITEM" | cut -d: -f2)
@@ -47,7 +51,71 @@ jobs:
             BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
             PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at // empty')
 
-            # 格式化发布日期为 YYYY.MM.DD
+            if [ -n "$PUBLISHED_AT" ] && [ "$PUBLISHED_AT" != "null" ]; then
+              RELEASE_DATE=$(date -d "$PUBLISHED_AT" +%Y.%m.%d 2>/dev/null || echo "$PUBLISHED_AT" | cut -c1-10 | tr '-' '.')
+              SORT_KEY=$(echo "$PUBLISHED_AT" | cut -c1-19 | tr 'T:' '--')
+            else
+              RELEASE_DATE="未知"
+              PUBLISHED_AT=""
+              SORT_KEY="0000-00-00T00-00-00"
+            fi
+
+            OUR_TAG="$PREFIX-$UPSTREAM_TAG"
+
+            echo "Upstream Tag: $UPSTREAM_TAG"
+            echo "Our Tag: $OUR_TAG"
+            echo "Release Date: $RELEASE_DATE"
+
+            # 始终清理该前缀的旧 Release
+            echo "Cleaning up old releases with prefix '$PREFIX-' (keep only $OUR_TAG)..."
+            OLD_TAGS=$(gh release list --repo "$REPO_NAME" --limit 100 --json tagName \
+              --jq ".[].tagName | select(startswith(\"$PREFIX-\"))" || true)
+
+            for OLD in $OLD_TAGS; do
+              if [ "$OLD" != "$OUR_TAG" ]; then
+                echo "Deleting old release + tag: $OLD"
+                gh release delete "$OLD" --repo "$REPO_NAME" --yes --cleanup-tag || true
+              fi
+            done
+
+            # 已存在就跳过
+            if gh release view "$OUR_TAG" --repo "$REPO_NAME" > /dev/null 2>&1; then
+              echo "Already exists: $OUR_TAG, cleanup done, skipping"
+              continue
+            fi
+
+            # 保存候选（用日期做文件名排序键）
+            CAND_FILE="\( CANDIDATES_DIR/ \){SORT_KEY}_${PREFIX}.json"
+            echo "$RELEASE_JSON" > "$CAND_FILE"
+            echo "Queued for create: $OUR_TAG  (sort key: $SORT_KEY)"
+          done
+
+          # ========== 第二阶段：按真实发布时间从旧到新创建 ==========
+          CAND_COUNT=$(ls "$CANDIDATES_DIR"/*.json 2>/dev/null | wc -l || echo 0)
+          echo ""
+          echo "Total candidates to create: $CAND_COUNT"
+
+          if [ "$CAND_COUNT" -eq 0 ]; then
+            echo "Nothing new to create."
+            rm -rf "$CANDIDATES_DIR"
+            exit 0
+          fi
+
+          # 按文件名排序（日期升序 = 最旧的先创建）
+          INDEX=0
+          TOTAL=$(ls "$CANDIDATES_DIR"/*.json | wc -l)
+
+          for CAND_FILE in $(ls "$CANDIDATES_DIR"/*.json | sort); do
+            INDEX=$((INDEX + 1))
+            RELEASE_JSON=$(cat "$CAND_FILE")
+
+            PREFIX=$(basename "$CAND_FILE" | sed 's/.*_//;s/\.json//')
+            UPSTREAM_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+            RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name')
+            RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url')
+            BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
+            PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at // empty')
+
             if [ -n "$PUBLISHED_AT" ] && [ "$PUBLISHED_AT" != "null" ]; then
               RELEASE_DATE=$(date -d "$PUBLISHED_AT" +%Y.%m.%d 2>/dev/null || echo "$PUBLISHED_AT" | cut -c1-10 | tr '-' '.')
             else
@@ -57,30 +125,10 @@ jobs:
 
             OUR_TAG="$PREFIX-$UPSTREAM_TAG"
 
-            echo "Upstream Tag: $UPSTREAM_TAG"
-            echo "Our Tag: $OUR_TAG"
-            echo "Release Date: $RELEASE_DATE"
-            echo "Published At: $PUBLISHED_AT"
-
-            # ========== 始终清理该前缀的旧 Release，只留最新 ==========
-            echo "Cleaning up old releases with prefix '$PREFIX-' (keep only $OUR_TAG)..."
-            OLD_TAGS=$(gh release list --repo "$REPO_NAME" --limit 100 --json tagName \
-              --jq ".[].tagName | select(startswith(\"$PREFIX-\"))")
-
-            for OLD in $OLD_TAGS; do
-              if [ "$OLD" != "$OUR_TAG" ]; then
-                echo "Deleting old release + tag: $OLD"
-                gh release delete "$OLD" --repo "$REPO_NAME" --yes --cleanup-tag || true
-              fi
-            done
-
-            # 如果已经存在最新的，就跳过创建
-            if gh release view "$OUR_TAG" --repo "$REPO_NAME" > /dev/null 2>&1; then
-              echo "Already exists: $OUR_TAG, cleanup done, skipping create"
-              continue
-            fi
-
-            echo "New version found, syncing..."
+            echo ""
+            echo "----------------------------------------"
+            echo "[$INDEX/$TOTAL] Creating: $OUR_TAG  (发布日期: $RELEASE_DATE)"
+            echo "----------------------------------------"
 
             TMP_DIR=$(mktemp -d)
             cd "$TMP_DIR"
@@ -108,16 +156,24 @@ jobs:
               echo "来源: $RELEASE_URL"
             } > /tmp/release_notes.md
 
-            # 先用 gh 创建 Release（带资产）
+            # 只有最后一个（真正最新的）才标记为 Latest
+            if [ "$INDEX" -eq "$TOTAL" ]; then
+              LATEST_FLAG="--latest=true"
+              echo ">>> This is the newest one, marking as Latest"
+            else
+              LATEST_FLAG="--latest=false"
+            fi
+
             gh release create "$OUR_TAG" \
               --repo "$REPO_NAME" \
               --title "$PREFIX - $RELEASE_NAME" \
               --notes-file /tmp/release_notes.md \
+              $LATEST_FLAG \
               $(ls -1)
 
-            # 如果有真实发布时间，强制把 published_at 改成上游时间（实现按时间排序）
+            # 写入真实 published_at
             if [ -n "$PUBLISHED_AT" ]; then
-              echo "Updating published_at to $PUBLISHED_AT for correct sorting..."
+              echo "Updating published_at to $PUBLISHED_AT..."
               RELEASE_ID=$(gh api "repos/$REPO_NAME/releases/tags/$OUR_TAG" --jq '.id')
               curl -s -X PATCH \
                 -H "Authorization: Bearer $GH_TOKEN" \
@@ -131,3 +187,7 @@ jobs:
             cd -
             rm -rf "$TMP_DIR"
           done
+
+          rm -rf "$CANDIDATES_DIR"
+          echo ""
+          echo "All done. Releases should now be sorted by real publish date (newest on top)."
