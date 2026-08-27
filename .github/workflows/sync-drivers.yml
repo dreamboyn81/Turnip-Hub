@@ -85,7 +85,7 @@ jobs:
             fi
 
             # 保存候选（用日期做文件名排序键）
-            CAND_FILE="\( CANDIDATES_DIR/ \){SORT_KEY}_${PREFIX}.json"
+            CAND_FILE="$CANDIDATES_DIR/${SORT_KEY}_${PREFIX}.json"
             echo "$RELEASE_JSON" > "$CAND_FILE"
             echo "Queued for create: $OUR_TAG  (sort key: $SORT_KEY)"
           done
