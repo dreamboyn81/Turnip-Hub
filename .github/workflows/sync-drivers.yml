@@ -24,10 +24,10 @@ jobs:
 
           SOURCES="DiskDVD:DiskDVD/TurniptoolsA8XX WinNative:WinNative-Emu/Drivers Vauzi:Vauzi-17/710 StevenMXZ:StevenMXZ/Adreno-Tools-Drivers whitebelyash:whitebelyash/AdrenoToolsDrivers MrPurple666:MrPurple666/purple-turnip"
 
-          CANDIDATES_DIR=$(mktemp -d)
-          echo "Candidates dir: $CANDIDATES_DIR"
+          WORK_DIR=$(mktemp -d)
+          echo "Work dir: $WORK_DIR"
 
-          # ========== 第一阶段：收集需要同步的驱动 + 清理旧版本 ==========
+          # ========== 第一阶段：抓取 + 下载到以发布日期命名的临时目录 ==========
           for ITEM in $SOURCES; do
             PREFIX=$(echo "$ITEM" | cut -d: -f1)
             REPO=$(echo "$ITEM" | cut -d: -f2)
@@ -58,11 +58,12 @@ jobs:
 
             if [ -n "$PUBLISHED_AT" ] && [ "$PUBLISHED_AT" != "null" ]; then
               RELEASE_DATE=$(date -d "$PUBLISHED_AT" +%Y.%m.%d 2>/dev/null || echo "$PUBLISHED_AT" | cut -c1-10 | tr '-' '.')
-              SORT_KEY=$(echo "$PUBLISHED_AT" | cut -c1-19 | tr 'T:' '--')
+              # 目录名用日期+时间，保证排序准确且唯一
+              DIR_KEY=$(echo "$PUBLISHED_AT" | cut -c1-19 | tr 'T:' '--')
             else
               RELEASE_DATE="未知"
               PUBLISHED_AT=""
-              SORT_KEY="0000-00-00T00-00-00"
+              DIR_KEY="0000-00-00T00-00-00"
             fi
 
             OUR_TAG="$PREFIX-$UPSTREAM_TAG"
@@ -71,96 +72,89 @@ jobs:
             echo "Our Tag: $OUR_TAG"
             echo "Release Date: $RELEASE_DATE"
 
-            # 始终清理该前缀的旧 Release
-            echo "Cleaning up old releases with prefix '$PREFIX-' (keep only $OUR_TAG)..."
+            # 清理该前缀的旧 Release
+            echo "Cleaning up old releases with prefix '$PREFIX-' ..."
             OLD_TAGS=$(gh release list --repo "$REPO_NAME" --limit 100 --json tagName \
               --jq ".[].tagName | select(startswith(\"$PREFIX-\"))" 2>/dev/null || true)
 
             for OLD in $OLD_TAGS; do
               if [ -n "$OLD" ] && [ "$OLD" != "$OUR_TAG" ]; then
-                echo "Deleting old release + tag: $OLD"
+                echo "Deleting old: $OLD"
                 gh release delete "$OLD" --repo "$REPO_NAME" --yes --cleanup-tag 2>/dev/null || true
               fi
             done
 
             # 已存在就跳过
             if gh release view "$OUR_TAG" --repo "$REPO_NAME" > /dev/null 2>&1; then
-              echo "Already exists: $OUR_TAG, cleanup done, skipping"
+              echo "Already exists: $OUR_TAG, skip"
               continue
             fi
 
-            # 保存候选
-            CAND_FILE="$CANDIDATES_DIR/${SORT_KEY}_${PREFIX}.json"
-            echo "$RELEASE_JSON" > "$CAND_FILE"
-            echo "Queued for create: $OUR_TAG  (sort key: $SORT_KEY)"
-          done
+            # 创建以发布日期命名的临时目录，并下载资产
+            TARGET_DIR="$WORK_DIR/${DIR_KEY}_${PREFIX}"
+            mkdir -p "$TARGET_DIR"
 
-          # ========== 第二阶段：按真实发布时间从旧到新创建 ==========
-          mapfile -t CAND_FILES < <(find "$CANDIDATES_DIR" -maxdepth 1 -name '*.json' -type f | sort)
+            # 保存元数据
+            echo "$RELEASE_JSON" > "$TARGET_DIR/release.json"
+            echo "$OUR_TAG" > "$TARGET_DIR/our_tag.txt"
+            echo "$PREFIX" > "$TARGET_DIR/prefix.txt"
+            echo "$RELEASE_NAME" > "$TARGET_DIR/release_name.txt"
+            echo "$RELEASE_URL" > "$TARGET_DIR/release_url.txt"
+            echo "$RELEASE_DATE" > "$TARGET_DIR/release_date.txt"
+            echo "$PUBLISHED_AT" > "$TARGET_DIR/published_at.txt"
+            printf '%s' "$BODY" > "$TARGET_DIR/body.txt"
 
-          CAND_COUNT=${#CAND_FILES[@]}
-          echo ""
-          echo "Total candidates to create: $CAND_COUNT"
-
-          if [ "$CAND_COUNT" -eq 0 ]; then
-            echo "Nothing new to create."
-            rm -rf "$CANDIDATES_DIR"
-            exit 0
-          fi
-
-          INDEX=0
-          TOTAL=$CAND_COUNT
-
-          for CAND_FILE in "${CAND_FILES[@]}"; do
-            INDEX=$((INDEX + 1))
-            RELEASE_JSON=$(cat "$CAND_FILE")
-
-            PREFIX=$(basename "$CAND_FILE" | sed 's/.*_//;s/\.json//')
-            UPSTREAM_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
-            RELEASE_NAME=$(echo "$RELEASE_JSON" | jq -r '.name // .tag_name // empty')
-            RELEASE_URL=$(echo "$RELEASE_JSON" | jq -r '.html_url // empty')
-            BODY=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
-            PUBLISHED_AT=$(echo "$RELEASE_JSON" | jq -r '.published_at // empty')
-
-            if [ -z "$UPSTREAM_TAG" ]; then
-              echo "Invalid candidate, skipping"
-              continue
-            fi
-
-            if [ -n "$PUBLISHED_AT" ] && [ "$PUBLISHED_AT" != "null" ]; then
-              RELEASE_DATE=$(date -d "$PUBLISHED_AT" +%Y.%m.%d 2>/dev/null || echo "$PUBLISHED_AT" | cut -c1-10 | tr '-' '.')
-            else
-              RELEASE_DATE="未知"
-              PUBLISHED_AT=""
-            fi
-
-            OUR_TAG="$PREFIX-$UPSTREAM_TAG"
-
-            echo ""
-            echo "----------------------------------------"
-            echo "[$INDEX/$TOTAL] Creating: $OUR_TAG  (发布日期: $RELEASE_DATE)"
-            echo "----------------------------------------"
-
-            TMP_DIR=$(mktemp -d)
-            cd "$TMP_DIR"
-
-            # 下载资产
+            # 下载所有资产到这个目录
             echo "$RELEASE_JSON" | jq -c '.assets[]?' 2>/dev/null | while read -r asset; do
               [ -z "$asset" ] && continue
               NAME=$(echo "$asset" | jq -r '.name // empty')
               URL=$(echo "$asset" | jq -r '.browser_download_url // empty')
               if [ -n "$NAME" ] && [ -n "$URL" ]; then
-                echo "Downloading: $NAME"
-                curl -sL -H "Authorization: Bearer $GH_TOKEN" -o "$NAME" "$URL" || echo "Failed to download $NAME"
+                echo "  Downloading: $NAME"
+                curl -sL -H "Authorization: Bearer $GH_TOKEN" -o "$TARGET_DIR/$NAME" "$URL" || echo "  Failed: $NAME"
               fi
             done
 
-            if [ -z "$(ls -A 2>/dev/null)" ]; then
-              echo "No assets found, skipping"
-              cd - >/dev/null
-              rm -rf "$TMP_DIR"
+            # 检查是否有资产
+            ASSET_COUNT=$(find "$TARGET_DIR" -maxdepth 1 -type f ! -name '*.txt' ! -name 'release.json' | wc -l)
+            if [ "$ASSET_COUNT" -eq 0 ]; then
+              echo "No assets, remove dir"
+              rm -rf "$TARGET_DIR"
               continue
             fi
+
+            echo "Prepared: $TARGET_DIR  (assets: $ASSET_COUNT)"
+          done
+
+          # ========== 第二阶段：按目录名（时间）从旧到新依次发布 ==========
+          mapfile -t DIRS < <(find "$WORK_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
+
+          TOTAL=${#DIRS[@]}
+          echo ""
+          echo "Total prepared: $TOTAL"
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "Nothing new to publish."
+            rm -rf "$WORK_DIR"
+            exit 0
+          fi
+
+          INDEX=0
+          for DIR in "${DIRS[@]}"; do
+            INDEX=$((INDEX + 1))
+
+            OUR_TAG=$(cat "$DIR/our_tag.txt")
+            PREFIX=$(cat "$DIR/prefix.txt")
+            RELEASE_NAME=$(cat "$DIR/release_name.txt")
+            RELEASE_URL=$(cat "$DIR/release_url.txt")
+            RELEASE_DATE=$(cat "$DIR/release_date.txt")
+            PUBLISHED_AT=$(cat "$DIR/published_at.txt")
+            BODY=$(cat "$DIR/body.txt")
+
+            echo ""
+            echo "----------------------------------------"
+            echo "[$INDEX/$TOTAL] Publishing: $OUR_TAG  (发布日期: $RELEASE_DATE)"
+            echo "----------------------------------------"
 
             {
               echo "发布日期：$RELEASE_DATE"
@@ -170,29 +164,30 @@ jobs:
               echo "来源: $RELEASE_URL"
             } > /tmp/release_notes.md
 
-            # 只有最后一个（真正最新的）才标记为 Latest
+            # 只有最后一个（最新）标记为 Latest
             if [ "$INDEX" -eq "$TOTAL" ]; then
               LATEST_FLAG="--latest=true"
-              echo ">>> This is the newest one, marking as Latest"
+              echo ">>> Newest one, mark as Latest"
             else
               LATEST_FLAG="--latest=false"
             fi
+
+            # 收集资产文件（排除元数据）
+            ASSETS=$(find "$DIR" -maxdepth 1 -type f ! -name '*.txt' ! -name 'release.json' -printf '%p ')
 
             gh release create "$OUR_TAG" \
               --repo "$REPO_NAME" \
               --title "$PREFIX - $RELEASE_NAME" \
               --notes-file /tmp/release_notes.md \
               $LATEST_FLAG \
-              $(ls -1) || {
-                echo "Failed to create release $OUR_TAG"
-                cd - >/dev/null
-                rm -rf "$TMP_DIR"
+              $ASSETS || {
+                echo "Failed to create $OUR_TAG"
                 continue
               }
 
-            # 写入真实 published_at
-            if [ -n "$PUBLISHED_AT" ]; then
-              echo "Updating published_at to $PUBLISHED_AT..."
+            # 更新 published_at
+            if [ -n "$PUBLISHED_AT" ] && [ "$PUBLISHED_AT" != "null" ]; then
+              echo "Set published_at = $PUBLISHED_AT"
               RELEASE_ID=$(gh api "repos/$REPO_NAME/releases/tags/$OUR_TAG" --jq '.id' 2>/dev/null || true)
               if [ -n "$RELEASE_ID" ]; then
                 curl -s -X PATCH \
@@ -203,12 +198,9 @@ jobs:
               fi
             fi
 
-            echo "✅ Successfully published: $OUR_TAG"
-
-            cd - >/dev/null
-            rm -rf "$TMP_DIR"
+            echo "✅ Published: $OUR_TAG"
           done
 
-          rm -rf "$CANDIDATES_DIR"
+          rm -rf "$WORK_DIR"
           echo ""
-          echo "All done. Releases should now be sorted by real publish date (newest on top)."
+          echo "All done. Should be sorted by real publish date (newest on top)."
